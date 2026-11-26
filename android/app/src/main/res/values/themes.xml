@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.MifareCounter" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
