@@ -10,14 +10,18 @@ lee y escribe tarjetas **físicas** por NFC.
   claves por defecto, muestra los value blocks y escribe el nuevo contador en la
   tarjeta (y la relee para confirmar).
 
-## El cálculo de la redundancia está en un solo sitio
+## ⚠️ El cálculo de la redundancia está vacío (a propósito)
 
-`app/src/main/java/com/mifarenfc/counter/ValueBlock.kt` es un puerto 1:1 de
-`app/valueblock.js`. Si tus tarjetas usan otro esquema (CRC, checksum propio,
-otro orden de bytes…), **solo hay que cambiar ese fichero**; la UI, la E/S de
-ficheros y el NFC no cambian. Mándame tus tarjetas de ejemplo y lo adapto.
+El motor es genérico. Cómo tus tarjetas codifican el contador lo rellenas tú en
+`app/src/main/java/com/mifarenfc/counter/Redundancy.kt` (funciones `decode` y
+`encode` de `EmptyScheme`). Hasta entonces la app avisa y no escribe.
 
-Verificado: produce exactamente los mismos bytes que la versión web ya probada.
+- Guía paso a paso: [`../REDUNDANCY.md`](../REDUNDANCY.md)
+- Ejemplo completo y funcional (estándar NXP): `RedundancyExampleStandardNxp.kt`
+  (para activarlo, copia su lógica a `EmptyScheme`, o pon
+  `var scheme = StandardNxpScheme` en `ValueBlock.kt`).
+
+Mantén esta lógica **sincronizada** con la web (`app/redundancy.js`).
 
 ## Compilar
 
@@ -40,7 +44,9 @@ transporte por defecto `FFFFFFFFFFFF` / `FF078069` lo permite).
 ```
 android/
   app/src/main/java/com/mifarenfc/counter/
-    ValueBlock.kt   ← lógica de redundancia (único módulo a tocar por esquema)
-    NfcCardIo.kt    ← lectura/escritura MIFARE Classic por NFC
-    MainActivity.kt ← UI Compose (pestañas Archivo / NFC)
+    Redundancy.kt                    ← esquema VACÍO a rellenar (decode/encode)
+    RedundancyExampleStandardNxp.kt  ← esquema de ejemplo / referencia
+    ValueBlock.kt                    ← motor genérico (no se toca por tarjeta)
+    NfcCardIo.kt                     ← lectura/escritura MIFARE Classic por NFC
+    MainActivity.kt                  ← UI Compose (pestañas Archivo / NFC)
 ```

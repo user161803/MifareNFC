@@ -79,7 +79,7 @@ class MainActivity : ComponentActivity(), NfcAdapter.ReaderCallback {
             runOnUiThread { state.nfcStatus = "Leyendo tarjeta…" }
             try {
                 val r = withContext(Dispatchers.IO) { NfcCardIo.read(tag) }
-                val vbs = ValueBlock.findValueBlocks(r.blocks)
+                val vbs = ValueBlock.findCounterBlocks(r.blocks)
                 runOnUiThread {
                     state.lastTag = tag
                     state.sectorKeys = r.sectorKeys
@@ -104,7 +104,12 @@ class MainActivity : ComponentActivity(), NfcAdapter.ReaderCallback {
         val vbs = state.nfcValueBlocks
         if (vbs.isEmpty()) return
         val changes = LinkedHashMap<Int, String>()
-        for (v in vbs) changes[v.block] = ValueBlock.buildValueBlock(value, v.adr, true)
+        try {
+            for (v in vbs) changes[v.block] = ValueBlock.scheme.encode(v.hex, value)
+        } catch (e: Throwable) {
+            state.nfcStatus = "No se puede escribir: ${e.message}"
+            return
+        }
         state.writing = true
         state.nfcStatus = "Escribiendo… mantén la tarjeta pegada al móvil."
         lifecycleScope.launch {
@@ -114,7 +119,7 @@ class MainActivity : ComponentActivity(), NfcAdapter.ReaderCallback {
                 }
                 // Releer para confirmar
                 val reread = withContext(Dispatchers.IO) { NfcCardIo.read(tag) }
-                val vbs2 = ValueBlock.findValueBlocks(reread.blocks)
+                val vbs2 = ValueBlock.findCounterBlocks(reread.blocks)
                 runOnUiThread {
                     state.nfcBlocks = reread.blocks
                     state.nfcValueBlocks = vbs2
@@ -149,7 +154,7 @@ private fun App(state: CardState, onWrite: () -> Unit) {
         if (v == null) { state.fileError = "Introduce un valor entero válido."; return@LaunchedEffect }
         try {
             val r = ValueBlock.setCounter(text, v)
-            if (r.valueBlocks.isEmpty()) state.fileError = "No se encontró ningún value block válido."
+            if (r.counterBlocks.isEmpty()) state.fileError = "No se detectó ningún bloque contador con el esquema activo."
             else state.fileResult = r
         } catch (e: Exception) { state.fileError = e.message }
     }
@@ -195,6 +200,17 @@ private fun App(state: CardState, onWrite: () -> Unit) {
                 Tab(tab == 0, { tab = 0 }, text = { Text("Archivo") })
                 Tab(tab == 1, { tab = 1 }, text = { Text("NFC") })
             }
+            if (ValueBlock.scheme.name == "sin implementar") {
+                Spacer(Modifier.height(12.dp))
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                    Text(
+                        "⚠️ Esquema de redundancia sin implementar. Edita Redundancy.kt " +
+                            "(decode/encode) con el sistema de tus tarjetas. Ver REDUNDANCY.md.",
+                        Modifier.padding(12.dp),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
             Spacer(Modifier.height(16.dp))
             if (tab == 0) FileTab(state, { openFile.launch(arrayOf("*/*")) },
                 { state.fileResult?.let { saveFile.launch(outName(state.fileName, state.counter)) } })
@@ -216,10 +232,10 @@ private fun FileTab(state: CardState, onOpen: () -> Unit, onSave: () -> Unit) {
     val r = state.fileResult
     if (r != null) {
         Spacer(Modifier.height(8.dp))
-        Text("Formato ${if (r.format == "json") "JSON MCT" else "texto .mct"} · ${r.valueBlocks.size} value block(s)",
+        Text("Formato ${if (r.format == "json") "JSON MCT" else "texto .mct"} · ${r.counterBlocks.size} bloque(s) contador",
             style = MaterialTheme.typography.bodySmall)
         Spacer(Modifier.height(8.dp))
-        for (v in r.valueBlocks) {
+        for (v in r.counterBlocks) {
             val c = r.changed.find { it.block == v.block }
             BlockCard(v, c)
         }
@@ -239,7 +255,8 @@ private fun NfcTab(state: CardState, onWrite: () -> Unit) {
         val value = state.counter.trim().toIntOrNull()
         for (v in vbs) {
             val c = value?.let {
-                ValueBlock.Change(v.block, v.hex, ValueBlock.buildValueBlock(it, v.adr, true), v.value, it, v.adr)
+                try { ValueBlock.Change(v.block, v.hex, ValueBlock.scheme.encode(v.hex, it), v.value, it) }
+                catch (e: Throwable) { null }
             }
             BlockCard(v, c)
         }

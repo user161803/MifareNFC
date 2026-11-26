@@ -1,9 +1,10 @@
 /*
- * Lógica de value blocks estándar de MIFARE Classic (formato público del
- * datasheet de NXP) sobre volcados MifareClassicTool (.json o .mct/.txt).
+ * Motor GENÉRICO sobre volcados de MifareClassicTool (.json o .mct/.txt).
  *
- *  bytes:  0  1  2  3   4  5  6  7   8  9 10 11   12 13 14 15
- *         [  Valor  ] [  ~Valor  ] [  Valor  ]  adr ~adr adr ~adr
+ * No contiene nada específico del formato del contador: delega toda la
+ * redundancia en el esquema de `redundancy.js` (funciones decode/encode).
+ * Para adaptar la app a otras tarjetas se edita SOLO redundancy.js; este
+ * fichero no cambia. Ver REDUNDANCY.md.
  *
  * Funciona en navegador (window.ValueBlock) y en Node (module.exports).
  */
@@ -12,52 +13,22 @@
 
   const HEX32 = /^[0-9A-Fa-f]{32}$/;
 
-  function hexToBytes(hex) {
-    const out = [];
-    for (let i = 0; i < hex.length; i += 2) out.push(parseInt(hex.substr(i, 2), 16));
-    return out;
-  }
+  // Esquema de redundancia activo (editable/inyectable para tests).
+  let scheme = (typeof module !== 'undefined' && module.exports)
+    ? require('./redundancy.js')
+    : root.RedundancyScheme;
 
-  function bytesToHex(bytes, upper) {
-    const s = bytes.map(b => b.toString(16).padStart(2, '0')).join('');
-    return upper ? s.toUpperCase() : s;
-  }
-
-  function readLE32(b, o) {
-    return (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) | 0; // con signo
-  }
-
-  function writeLE32(v) {
-    const u = v >>> 0;
-    return [u & 0xFF, (u >>> 8) & 0xFF, (u >>> 16) & 0xFF, (u >>> 24) & 0xFF];
-  }
+  function useScheme(s) { scheme = s; }
+  function getScheme() { return scheme; }
 
   /** Índice de bloque -> ¿es trailer de sector? (1K/Mini/2K/4K) */
   function isTrailer(block) {
     if (block < 128) return block % 4 === 3;
     return (block - 128) % 16 === 15;
   }
-
-  /** Devuelve {value, adr} si el bloque es un value block coherente; si no, null. */
-  function parseValueBlock(hex) {
-    if (!HEX32.test(hex)) return null;
-    const b = hexToBytes(hex);
-    for (let i = 0; i < 4; i++) {
-      if (b[i] !== b[i + 8]) return null;           // Valor == copia
-      if ((b[i] ^ b[i + 4]) !== 0xFF) return null;  // Valor XOR ~Valor == FF
-    }
-    if (b[12] !== b[14] || b[13] !== b[15]) return null;
-    if ((b[12] ^ b[13]) !== 0xFF) return null;      // adr XOR ~adr == FF
-    return { value: readLE32(b, 0), adr: b[12] };
-  }
-
-  /** Construye un value block con el valor dado y la redundancia recalculada. */
-  function buildValueBlock(value, adr, upper) {
-    const v = writeLE32(value);
-    const nv = v.map(x => (~x) & 0xFF);
-    const a = adr & 0xFF;
-    const na = (~a) & 0xFF;
-    return bytesToHex([...v, ...nv, ...v, a, na, a, na], upper);
+  /** Índice de sector de un bloque. */
+  function sectorOf(block) {
+    return block < 128 ? (block >> 2) : 32 + ((block - 128) >> 4);
   }
 
   /* ---------------- Parsers de volcado ---------------- */
@@ -74,7 +45,6 @@
       for (const [k, v] of Object.entries(data.blocks)) blocks[parseInt(k, 10)] = String(v);
       return { format: 'json', blocks };
     }
-    // Formato texto MCT: "+Sector: N" seguido de 4 (o 16) líneas de 32 hex ('-' = desconocido)
     const blocks = {};
     let sector = -1, inSector = 0, found = false;
     for (const raw of text.split(/\r?\n/)) {
@@ -90,22 +60,23 @@
     return { format: 'mct', blocks };
   }
 
-  /** Bloques que son value blocks válidos (excluye bloque 0 y trailers). */
-  function findValueBlocks(blocks) {
+  /**
+   * Bloques que el esquema activo reconoce como contadores (excluye bloque 0 y
+   * trailers). Cada uno: {block, hex, value, info}.
+   */
+  function findCounterBlocks(blocks) {
     const res = [];
     for (const k of Object.keys(blocks).map(Number).sort((a, b) => a - b)) {
       if (k === 0 || isTrailer(k)) continue;
-      const vb = parseValueBlock(blocks[k]);
-      if (vb) res.push({ block: k, hex: blocks[k], value: vb.value, adr: vb.adr });
+      const hex = blocks[k];
+      if (!HEX32.test(hex)) continue;
+      const d = scheme.decode(hex);
+      if (d && typeof d.value === 'number') res.push({ block: k, hex, value: d.value, info: d });
     }
     return res;
   }
 
-  /**
-   * Reescribe el texto original cambiando SOLO los bloques indicados, preservando
-   * todo lo demás byte a byte (formato, espaciado, orden, mayúsculas).
-   * changes: {blockIdx: newHex}
-   */
+  /** Reescribe el texto original cambiando SOLO los bloques indicados, byte a byte. */
   function rewriteDump(text, format, changes) {
     if (format === 'json') {
       let out = text;
@@ -116,7 +87,6 @@
       }
       return out;
     }
-    // mct: reconstruir línea a línea conservando los saltos de línea originales
     const parts = text.split(/(\r?\n)/);
     let sector = -1, inSector = 0;
     for (let i = 0; i < parts.length; i += 2) {
@@ -135,30 +105,29 @@
   }
 
   /**
-   * Operación completa: devuelve {text, changed:[{block, oldHex, newHex, oldValue, newValue}]}.
-   * selected: lista de bloques a modificar (por defecto todos los value blocks detectados).
+   * Operación completa: devuelve {text, format, changed, counterBlocks}.
+   * selected: bloques a modificar (por defecto, todos los contadores detectados).
    */
   function setCounter(text, newValue, selected) {
-    if (!Number.isInteger(newValue) || newValue < -2147483648 || newValue > 2147483647) {
-      throw new Error('El valor debe ser un entero de 32 bits con signo.');
-    }
     const { format, blocks } = parseDump(text);
-    const vbs = findValueBlocks(blocks);
-    const targets = selected ? vbs.filter(v => selected.includes(v.block)) : vbs;
+    const cbs = findCounterBlocks(blocks);
+    const targets = selected ? cbs.filter(v => selected.includes(v.block)) : cbs;
     const changes = {};
     const changed = [];
     for (const v of targets) {
-      const upper = v.hex === v.hex.toUpperCase();
-      const newHex = buildValueBlock(newValue, v.adr, upper);
+      const newHex = scheme.encode(v.hex, newValue);
+      if (!HEX32.test(newHex)) {
+        throw new Error('encode() devolvió un bloque inválido (' + newHex + ') para el bloque ' + v.block + '.');
+      }
       changes[v.block] = newHex;
-      changed.push({ block: v.block, oldHex: v.hex, newHex, oldValue: v.value, newValue, adr: v.adr });
+      changed.push({ block: v.block, oldHex: v.hex, newHex, oldValue: v.value, newValue });
     }
-    return { text: rewriteDump(text, format, changes), format, changed, valueBlocks: vbs };
+    return { text: rewriteDump(text, format, changes), format, changed, counterBlocks: cbs };
   }
 
   const api = {
-    parseValueBlock, buildValueBlock, parseDump, findValueBlocks,
-    rewriteDump, setCounter, isTrailer,
+    useScheme, getScheme, isTrailer, sectorOf,
+    parseDump, findCounterBlocks, rewriteDump, setCounter,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.ValueBlock = api;

@@ -8,13 +8,15 @@
   :root {
     --bg: #f6f7f9; --card: #ffffff; --text: #1b1f24; --muted: #5b6573;
     --border: #d9dee5; --accent: #2563eb; --accent-text: #ffffff;
-    --ok: #15803d; --bad: #b91c1c; --old: #fde8e8; --new: #e3f5e8; --mono-bg: #f0f2f5;
+    --ok: #15803d; --bad: #b91c1c; --warn: #92600a; --old: #fde8e8; --new: #e3f5e8;
+    --mono-bg: #f0f2f5; --warn-bg: #fdf4e3;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: #111418; --card: #1a1e24; --text: #e6e9ee; --muted: #9aa4b2;
       --border: #2c333d; --accent: #4f8cff; --accent-text: #0b0d10;
-      --ok: #4ade80; --bad: #f87171; --old: #3a1d1f; --new: #15301f; --mono-bg: #22272f;
+      --ok: #4ade80; --bad: #f87171; --warn: #fbbf24; --old: #3a1d1f; --new: #15301f;
+      --mono-bg: #22272f; --warn-bg: #2a2410;
     }
   }
   * { box-sizing: border-box; }
@@ -22,8 +24,11 @@
     font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
   h1 { font-size: 1.5rem; margin: 0 0 4px; }
-  p.lead { color: var(--muted); margin: 0 0 20px; }
+  p.lead { color: var(--muted); margin: 0 0 16px; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .banner { background: var(--warn-bg); border: 1px solid var(--warn); color: var(--warn);
+    border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; font-size: .92rem; }
+  .banner code { background: transparent; }
   .drop { border: 2px dashed var(--border); border-radius: 10px; padding: 28px 16px; text-align: center; cursor: pointer; color: var(--muted); }
   .drop.over { border-color: var(--accent); color: var(--text); }
   .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
@@ -46,13 +51,14 @@
   .hex.old { background: var(--old); } .hex.new { background: var(--new); }
   .scroll { overflow-x: auto; }
   .legend { font-size: .85rem; color: var(--muted); }
-  .legend pre { background: var(--mono-bg); padding: 10px; border-radius: 6px; overflow-x: auto; margin: 8px 0 0; }
 </style>
 </head>
 <body>
 <main>
   <h1>Editor de contador MIFARE Classic</h1>
-  <p class="lead">Sube volcados de MifareClassicTool (<code>.json</code> o <code>.mct</code>/<code>.txt</code>) y descarga una copia idéntica con el contador del value block cambiado y su redundancia recalculada. Todo se procesa en tu navegador.</p>
+  <p class="lead">Sube volcados de MifareClassicTool (<code>.json</code> o <code>.mct</code>/<code>.txt</code>) y descarga una copia idéntica con el contador cambiado y su redundancia recalculada. Todo se procesa en tu navegador.</p>
+
+  <div id="schemeBanner"></div>
 
   <div class="card">
     <div class="row" style="margin-bottom:12px">
@@ -68,23 +74,35 @@
 
   <div id="results"></div>
 
-  <details class="card legend">
-    <summary>Cómo se ajusta la redundancia</summary>
-    <pre> bytes:  0  1  2  3   4  5  6  7   8  9 10 11   12 13 14 15
-        [  Valor  ] [  ~Valor  ] [  Valor  ]  adr ~adr adr ~adr</pre>
-    <p>Se detectan los bloques de datos que son value blocks coherentes (Valor = copia, Valor XOR ~Valor = FFFFFFFF, adr XOR ~adr = FF). Para cada uno se escribe el nuevo valor en little-endian, su complemento a uno y la copia; el byte de dirección se conserva. El resto del fichero (UID, claves, trailers, formato) queda byte a byte igual.</p>
-  </details>
+  <p class="legend">¿Otro tipo de tarjeta? El cálculo de la redundancia está aislado en <code>app/redundancy.js</code>; la guía para adaptarlo está en <code>REDUNDANCY.md</code>.</p>
 </main>
 
+<script src="redundancy.js"></script>
 <script src="valueblock.js"></script>
 <script>
 (function () {
   'use strict';
+  const scheme = ValueBlock.getScheme();
+  const schemeImplemented = scheme && scheme.name !== 'sin implementar';
+
+  const banner = document.getElementById('schemeBanner');
+  if (!schemeImplemented) {
+    banner.className = 'banner';
+    banner.innerHTML = '⚠️ <strong>Esquema de redundancia sin implementar.</strong> '
+      + 'Edita <code>app/redundancy.js</code> (funciones <code>decode</code> y <code>encode</code>) '
+      + 'con el sistema de tus tarjetas. Tienes un ejemplo completo en '
+      + '<code>redundancy.example-standard-nxp.js</code> y la guía en <code>REDUNDANCY.md</code>.';
+  } else {
+    banner.className = 'legend';
+    banner.style.marginBottom = '16px';
+    banner.innerHTML = 'Esquema activo: <strong>' + esc(scheme.name) + '</strong>.';
+  }
+
   const drop = document.getElementById('drop');
   const fileInput = document.getElementById('file');
   const valueInput = document.getElementById('value');
   const results = document.getElementById('results');
-  const loaded = []; // {name, text, el}
+  const loaded = [];
 
   drop.addEventListener('click', () => fileInput.click());
   drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); } });
@@ -125,23 +143,32 @@
         throw new Error('Introduce un valor entero válido (32 bits con signo).');
       }
       const dump = ValueBlock.parseDump(item.text);
-      const vbs = ValueBlock.findValueBlocks(dump.blocks);
-      if (!vbs.length) throw new Error('No se ha encontrado ningún value block válido en el volcado.');
-      if (!item.selected) item.selected = vbs.map(v => v.block);
+      const cbs = ValueBlock.findCounterBlocks(dump.blocks);
+      if (!cbs.length) {
+        throw new Error(schemeImplemented
+          ? 'No se ha detectado ningún bloque contador con el esquema "' + scheme.name + '".'
+          : 'Esquema sin implementar: aún no se detecta ningún bloque contador. Edita app/redundancy.js.');
+      }
+      if (!item.selected) item.selected = cbs.map(v => v.block);
       const res = ValueBlock.setCounter(item.text, value, item.selected);
 
-      // Verificación: re-parsear la salida y comprobar
+      // Verificación: re-parsear la salida con el esquema activo
       const check = ValueBlock.parseDump(res.text);
-      const okBlocks = res.changed.every(c => { const p = ValueBlock.parseValueBlock(check.blocks[c.block]); return p && p.value === value; });
-      const others = Object.keys(dump.blocks).filter(k => !item.selected.includes(+k)).every(k => dump.blocks[k] === check.blocks[k]);
+      const okBlocks = res.changed.every(c => {
+        const d = ValueBlock.getScheme().decode(check.blocks[c.block]);
+        return d && d.value === value;
+      });
+      const others = Object.keys(dump.blocks)
+        .filter(k => !item.selected.includes(+k))
+        .every(k => dump.blocks[k] === check.blocks[k]);
 
       html += '<div class="meta">Formato: ' + (dump.format === 'json' ? 'JSON MCT' : 'texto .mct') + ' · '
-        + Object.keys(dump.blocks).length + ' bloques · ' + vbs.length + ' value block(s)</div>';
+        + Object.keys(dump.blocks).length + ' bloques · ' + cbs.length + ' bloque(s) contador</div>';
       html += '<div class="scroll"><table><thead><tr><th></th><th>Bloque</th><th>Valor</th><th>Contenido</th></tr></thead><tbody>';
-      for (const v of vbs) {
+      for (const v of cbs) {
         const c = res.changed.find(x => x.block === v.block);
         html += '<tr><td><input type="checkbox" data-block="' + v.block + '"' + (c ? ' checked' : '') + ' aria-label="Modificar bloque ' + v.block + '"></td>'
-          + '<td>' + v.block + ' <span class="legend">(sector ' + (v.block < 128 ? v.block >> 2 : 32 + ((v.block - 128) >> 4)) + ')</span></td>'
+          + '<td>' + v.block + ' <span class="legend">(sector ' + ValueBlock.sectorOf(v.block) + ')</span></td>'
           + '<td>' + v.value + (c ? ' → <strong>' + value + '</strong>' : '') + '</td>'
           + '<td><span class="hex mono' + (c ? ' old' : '') + '">' + fmtHex(v.hex) + '</span>'
           + (c ? '<br><span class="hex mono new">' + fmtHex(c.newHex) + '</span>' : '') + '</td></tr>';
